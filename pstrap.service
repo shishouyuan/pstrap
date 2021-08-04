@@ -1,0 +1,13 @@
+[Unit]
+Description=Port Scanner Trap
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Restart=on-failure
+RestartSec=10s
+ExecStart=/bin/pstrap.py
+
+[Install]
+WantedBy=multi-user.target
