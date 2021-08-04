@@ -213,6 +213,7 @@ def listen(port:int):
             cs,addr=s.accept()
             rip,rport=addr
             lip,lport=cs.getsockname()
+            cs.close()
             time=datetime.now().strftime(datetimeFormat)
             logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
 
