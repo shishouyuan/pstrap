@@ -3,7 +3,7 @@
 
 **pstrap**(Port Scanner Trap)侦听特定的端口（**陷阱端口**，例如监听22 tcp 端口来伪装成SSH服务），并且会**阻止连接这些端口的IP到本机的所有连接**。这是一个阻止端口扫描的简单方法。 目前需要和ufw配合使用。
 
-# Configration 配置
+# Configuration 配置
 ```ini
 # /etc/pstrap/pstrap.ini
 [DEFAULT]
