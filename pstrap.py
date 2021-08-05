@@ -15,7 +15,7 @@ def initLogging(LogFileName:str)->logging.Logger:
     '''初始化日志记录模块'''
     formatter = logging.Formatter("%(asctime)s - %(filename)s[%(lineno)d] - %(levelname)s: %(message)s")
     
-    fh = logging.handlers.RotatingFileHandler(LogFileName, mode='a', maxBytes=10240, backupCount=2,encoding='utf8')
+    fh = logging.handlers.RotatingFileHandler(LogFileName, mode='a', maxBytes=1024*1024*10, backupCount=2,encoding='utf8')
     fh.setLevel(logging.INFO)  
     fh.setFormatter(formatter)
 
