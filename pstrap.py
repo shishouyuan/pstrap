@@ -134,6 +134,11 @@ saveDB()
 
 def cleanOldRules(onlyConfig=False):
     '''清除过期规则，onlyConfig=True时只清除配置文件不处理防火墙'''
+
+    if trappedDuration<=0:
+        logging.debug(f'Skip old rules cleaning because trappedDuration = {trappedDuration} is not positive.')
+        return
+
     lock.acquire()
     try:
         now=datetime.now()

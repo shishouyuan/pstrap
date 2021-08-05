@@ -10,5 +10,5 @@
 trap_ports = 22,3389    # trap ports
 db_file = /etc/pstrap/pstrapped.ini # file stores trapped IPs
 log_file = /var/log/pstrap.log  # log file
-trapped_duration = 10080    # minutes that a IP is trapped, after which the rule is deleted
+trapped_duration = 10080    # minutes that a IP is trapped, after which the rule is deleted. set to zero to disable this function.
 ```
