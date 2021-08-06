@@ -144,9 +144,10 @@ def cleanOldRules(onlyConfig=False):
         now=datetime.now()
         for i in db.sections():
             sec=db[i]
-            dur=now-datetime.strptime(sec[keys.trappedTime], datetimeFormat)
+            trappedTime=datetime.strptime(sec[keys.trappedTime], datetimeFormat)
+            dur=now-trappedTime
             if dur.total_seconds()<0 or dur.total_seconds()/60>trappedDuration:
-                logging.info(f'Rule for {i} expired.' )
+                logging.info(f'Rule for {i} expired, which was created at {trappedTime}.' )
                 db.remove_section(i)
                 if not onlyConfig:
                     deleteIPRule(i)
@@ -238,9 +239,7 @@ def cleaner():
     while True:
         time.sleep(cleanerSleepTime)
         cleanOldRules()
-        logging.debug("Old rule cleaning finished.")
-
-#for i in trapPorts:
+        logging.debug(f"Old rule cleaning finished, with {len(db.sections())} remained.")
 
 cleanOldRules(True)
 clearAllRule()
