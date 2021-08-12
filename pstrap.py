@@ -125,8 +125,7 @@ datetimeFormat='%Y-%m-%dT%H:%M:%S'
 
 def saveDB():
     ''' 将规则保存的配置文件'''
-    with lock:
-        with lock, open(dbFileName,'w') as dbFile:
+    with lock, open(dbFileName,'w') as dbFile:
             db.write(dbFile)
     
 saveDB()
