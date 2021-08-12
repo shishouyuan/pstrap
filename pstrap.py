@@ -1,4 +1,4 @@
-#! /bin/python3
+#!/bin/python3
 import configparser
 import logging
 import logging.handlers
@@ -68,15 +68,16 @@ class keys:
 
 
 # 读取配置文件
+trapPorts=[]
 try:
     print(f'Reading config file: {configFileName}')
-
+    
     config=configparser.ConfigParser(
         defaults={
             keys.trapPorts:'',
             keys.dbFile:dbFileName,
             keys.logFile:'/var/log/pstrap.log',
-            keys.trappedDuration:60*24*7
+            keys.trappedDuration:str(60*24*7)
             })
 
     if not os.path.exists(os.path.dirname(configFileName)):
@@ -87,10 +88,9 @@ try:
 
     defaults=config.defaults()
 
-    initLogging(defaults[keys.logFile])
+    initLogging(defaults[keys.logFile])    
 
-    trapPorts=[]
-    for i in re.split('\s*,\s*',defaults[keys.trapPorts]):
+    for i in re.split(r'\s*,\s*',defaults[keys.trapPorts]):
         try:
             p=int(i)
             if p>0 and p not in trapPorts:
@@ -118,17 +118,17 @@ except Exception as e:
 
 ruleComment='pstrap rule'
 
-lock=threading.Lock()
+lock=threading.RLock()
 
 datetimeFormat='%Y-%m-%dT%H:%M:%S'
 
 
 def saveDB():
     ''' 将规则保存的配置文件'''
-    lock.acquire()
-    with open(dbFileName,'w') as dbFile:
-        db.write(dbFile)
-    lock.release()
+    with lock:
+        with lock, open(dbFileName,'w') as dbFile:
+            db.write(dbFile)
+    
 saveDB()
 
 
@@ -139,23 +139,24 @@ def cleanOldRules(onlyConfig=False):
         logging.debug(f'Skip old rules cleaning because {keys.trappedDuration}={trappedDuration} is not positive.')
         return
 
-    lock.acquire()
-    try:
-        now=datetime.now()
-        for i in db.sections():
-            sec=db[i]
-            trappedTime=datetime.strptime(sec[keys.trappedTime], datetimeFormat)
-            dur=now-trappedTime
-            if dur.total_seconds()<0 or dur.total_seconds()/60>trappedDuration:
-                logging.info(f'Rule for {i} expired, which was created at {trappedTime}.' )
-                db.remove_section(i)
-                if not onlyConfig:
-                    deleteIPRule(i)
-    except Exception as e:
-        logging.error(f"Clean old rules error: {e}")
-
-    lock.release()
-    saveDB()
+    db_changed=False
+    with lock:
+        try:
+            now=datetime.now()
+            for i in db.sections():
+                sec=db[i]
+                trappedTime=datetime.strptime(sec[keys.trappedTime], datetimeFormat)
+                dur=now-trappedTime
+                if dur.total_seconds()<0 or dur.total_seconds()/60>trappedDuration:
+                    logging.info(f'Rule for {i} expired, which was created at {trappedTime}.' )
+                    db.remove_section(i)
+                    db_changed=True
+                    if not onlyConfig:
+                        deleteIPRule(i)
+        except Exception as e:
+            logging.error(f"Clean old rules error: {e}")
+        if db_changed:
+            saveDB()
 
 def addAllRule(): 
     '''把所有规则加入防火墙'''   
@@ -165,47 +166,44 @@ def addAllRule():
         denyIP(i,db[i][keys.trappedTime])
 
 def allowPort(port:int):
-    lock.acquire()
-    os.system(f'ufw insert 1 allow "{port}/tcp" comment "{ruleComment}"')
-    lock.release()
+    with lock:
+        os.system(f'ufw insert 1 allow "{port}/tcp" comment "{ruleComment}"')
+    
+def denyIP(ip:str, time:str):   
+    with lock: 
+        r=os.popen(f'ufw insert 1 deny from "{ip}" comment "{ruleComment} {time}"').read()
+        logging.debug('Added deny rule for %s. ufw result:\n%s', ip, r)
+    
 
-def denyIP(ip:str, time:datetime):   
-    lock.acquire() 
-    r=os.popen(f'ufw insert 1 deny from "{ip}" comment "{ruleComment} {time}"').read()
-    logging.debug('Added deny rule for %s. ufw result:\n%s', ip, r)
-    lock.release()
-
-def deleteIPRule(ip:str):
-
-    lock.acquire()
-    n=0
-    while True:
-        r=os.popen('ufw status numbered').read()
-        m=re.search(r'^\[\s*(\d+)\s*\].*?{}.*?#\s*{}.*$'.format(ip,ruleComment),r,flags=re.MULTILINE)
-        print(m)
-        if m:
-            os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
-            n+=1
-        else:
-            break    
-    logging.debug("%d rule for %s deleted.",n,ip)
-    lock.release()
+def deleteIPRule(ip:str, locked:bool=False):    
+    with lock:
+        n=0
+        while True:
+            r=os.popen('ufw status numbered').read()
+            m=re.search(r'^\[\s*(\d+)\s*\].*?{}.*?#\s*{}.*$'.format(ip,ruleComment),r,flags=re.MULTILINE)
+            print(m)
+            if m:
+                os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
+                n+=1
+            else:
+                break    
+        logging.debug("%d rule for %s deleted.",n,ip)
+    
 
 def clearAllRule():
     '''删除所有备注匹配的规则'''
-    lock.acquire()
-    n=0
-    while True:
-        r=os.popen('ufw status numbered').read()
-        m=re.search(r'^\[\s*(\d+)\s*\].*?#.*{}.*$'.format(ruleComment),r,flags=re.MULTILINE)
-        if m:
-            os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
-            n+=1
-        else:
-            break    
-    logging.debug("Rule cleared. %d deleted.",n)
-    lock.release()
-
+    with lock:
+        n=0
+        while True:
+            r=os.popen('ufw status numbered').read()
+            m=re.search(r'^\[\s*(\d+)\s*\].*?#.*{}.*$'.format(ruleComment),r,flags=re.MULTILINE)
+            if m:
+                os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
+                n+=1
+            else:
+                break    
+        logging.debug("Rule cleared. %d deleted.",n)
+    
 def listen(port:int):
     '''各端口监听线程'''
     with socket.socket() as s:
@@ -223,13 +221,13 @@ def listen(port:int):
             time=datetime.now().strftime(datetimeFormat)
             logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
 
-            lock.acquire()
-            if not db.has_section(rip):
-                db.add_section(rip)    
-            sec=db[rip]    
-            sec[keys.trappedTime]=time
-            sec[keys.trappedPort]=str(lport)
-            lock.release()  
+            with lock:
+                if not db.has_section(rip):
+                    db.add_section(rip)    
+                sec=db[rip]    
+                sec[keys.trappedTime]=time
+                sec[keys.trappedPort]=str(lport)
+                  
             saveDB()
             denyIP(rip,time) 
 
