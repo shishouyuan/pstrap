@@ -44,7 +44,8 @@ iptables_main_chain='INPUT'
 
 def getRulesFromIptables(table,chain)->list:
     with lock:
-        r=os.popen(f'iptables -t "{table}" -L "{chain}" --line-numbers').read().splitlines()        
+        with os.popen(f'iptables -t "{table}" -L "{chain}" -n --line-numbers') as o:
+            r=o.read().splitlines()        
         if len(r)<=2:
             return []
         v=[]
