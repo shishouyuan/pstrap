@@ -1,4 +1,4 @@
-#!/bin/python3
+#!/usr/bin/python3
 import configparser
 import logging
 import logging.handlers
@@ -8,11 +8,137 @@ import socket
 import sys
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime
+
+app_name='pstrap'
+
+# 默认配置文件位置
+defaultConfigDir='/etc/pstrap'
+configFileName=os.path.join(defaultConfigDir,'pstrap.ini')
+dbFileName=os.path.join(defaultConfigDir,'pstrapped.ini')
+dbFileName_cmd=None
+
+# keys in config file
+class config_keys:
+    trapPorts='trap_ports'
+    dbFile='db_file'
+    logFile='log_file'
+    trappedDuration='trapped_duration'
+    trappedTime='trapped_time'
+    trappedPort='trapped_port'
+
+class iptables_names:
+    trap_port_chain=f'{app_name}_trap_port_allow'
+    deny_chian=f'{app_name}_trapped_deny'
+
+# globals variables
+trap_ports=[]
+db=configparser.ConfigParser()
+lock=threading.RLock()
+datetime_format='%Y-%m-%dT%H:%M:%S'
+trapped_duration=0
+cleaner_sleep_time=60
+iptables_main_table='filter'
+iptables_main_chain='INPUT'
 
 
-def initLogging(LogFileName:str)->logging.Logger:
-    '''初始化日志记录模块'''
+def getRulesFromIptables(table,chain)->list:
+    with lock:
+        r=os.popen(f'iptables -t "{table}" -L "{chain}" --line-numbers').read().splitlines()        
+        if len(r)<=2:
+            return []
+        v=[]
+        for i in range(2,len(r)):
+            t=r[i].split()
+            if len(t)>=6:
+                v.append({
+                    'num':t[0],
+                    'target':t[1],
+                    'prot':t[2],
+                    'opt':t[3],
+                    'source':t[4],
+                    'destination':t[5],
+                    '_others':t[6:] if len(t)>6 else None
+                })
+        return v
+
+def deleteRuleByNumber(num:int,table:str,chain:str):
+    with lock:
+        return os.system(f'iptables -t "{table}" -D "{chain}" {num}')
+ 
+def disableChains():
+    deleteRule(iptables_main_table,iptables_main_chain,'target',iptables_names.trap_port_chain)  
+    deleteRule(iptables_main_table,iptables_main_chain,'target',iptables_names.deny_chian)  
+  
+def enableChains():
+    with lock:        
+        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.trap_port_chain}"')
+        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.deny_chian}"')
+
+def initIptables():
+    disableChains()
+    removeChain(iptables_names.trap_port_chain)
+    removeChain(iptables_names.deny_chian)
+    createChain(iptables_names.trap_port_chain)
+    createChain(iptables_names.deny_chian)
+    enableChains()   
+    
+def deleteRule(table:str,chain:str,field:str,val:str)->int:
+    with lock: # rule number may change by other operation
+        n=0
+        finished=False
+        while not finished:
+            finished=True
+            r=getRulesFromIptables(table,chain)        
+            for i in r:
+                try:
+                    if i[field]==val:
+                        deleteRuleByNumber(int(i['num']),table,chain)
+                        n+=1
+                        finished=False
+                        break
+                except Exception as e:
+                    logging.warning(f'Delete rule failed with error {e}')
+                    finished=True
+                    break            
+        return n
+
+def allowPort(port:int,table:str=iptables_main_table,chain:str=iptables_names.trap_port_chain):
+    with lock:
+        r=os.system(f'iptables -t "{table}" -I "{chain}" -p tcp --dport "{port}" -j ACCEPT ')
+        if r==0:           
+            logging.debug(f'Added allow rule for port {port}.')
+        else:
+            logging.warning(f'Failed to add allow rule for port {port} into {table}.{chain} with code {r}.')
+    
+def denyIP(ip:str,table:str=iptables_main_table,chain:str=iptables_names.deny_chian):   
+    with lock: 
+        r=os.system(f'iptables -t "{table}" -I "{chain}" -s "{ip}" -j DROP ')
+        if r==0:           
+            logging.debug(f'Added deny rule for {ip}.')
+        else:
+            logging.warning(f'Failed to add deny rule for {ip} into {table}.{chain} with code {r}.')
+
+def deleteIPDenyRule(ip:str, table:str=iptables_main_table,chain:str=iptables_names.deny_chian):    
+    n=deleteRule(table,chain,'source',ip)  
+    logging.debug(f'Deleted {n} deny rule for {ip}.')
+        
+def createChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        return os.system(f'iptables -t "{table}" -N "{name}"')==0
+
+def removeChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        if cleanChain(name,table):
+            return  os.system(f'iptables -t "{table}" -X "{name}"')==0
+        else:
+            return False
+
+def cleanChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        return os.system(f'iptables -t "{table}" -F "{name}"')==0
+    
+def initLogging(LogFileName:str)->logging.Logger:    
     formatter = logging.Formatter("%(asctime)s - %(filename)s[%(lineno)d] - %(levelname)s: %(message)s")
     
     fh = logging.handlers.RotatingFileHandler(LogFileName, mode='a', maxBytes=1024*1024*10, backupCount=2,encoding='utf8')
@@ -29,113 +155,15 @@ def initLogging(LogFileName:str)->logging.Logger:
     logger.addHandler(ch)
     return logger
 
-# 默认配置文件位置
-defaultConfigDir='/etc/pstrap'
-configFileName=os.path.join(defaultConfigDir,'pstrap.ini')
-dbFileName=os.path.join(defaultConfigDir,'pstrapped.ini')
-dbFileName_cmd=None
-
-# 从命令行传入的配置文件路径
-for i in range(1,len(sys.argv)):
-    cv=sys.argv[i]
-    if cv=='-c':
-        if len(sys.argv)>i+1:
-            i+=1
-            configFileName=sys.argv[i]
-            continue
-        else:
-            print('-c arg not given.')
-            sys.exit(-1)
-    if cv=='-d':
-        if len(sys.argv)>i+1:
-            i+=1
-            dbFileName_cmd=sys.argv[i]
-            continue
-        else:
-            print('-d arg not given.')
-            sys.exit(-1)
- 
-
-# 配置文件中的键
-class keys:
-    trapPorts='trap_ports'
-    dbFile='db_file'
-    logFile='log_file'
-    trappedDuration='trapped_duration'
-    trappedTime='trapped_time'
-    trappedPort='trapped_port'
+def saveDB():    
     
-
-
-# 读取配置文件
-trapPorts=[]
-try:
-    print(f'Reading config file: {configFileName}')
-    
-    config=configparser.ConfigParser(
-        defaults={
-            keys.trapPorts:'',
-            keys.dbFile:dbFileName,
-            keys.logFile:'/var/log/pstrap.log',
-            keys.trappedDuration:str(60*24*7)
-            })
-
-    if not os.path.exists(os.path.dirname(configFileName)):
-        os.mkdir(os.path.dirname(configFileName))
-    config.read(configFileName)
-    with open(configFileName,'w') as configFile:
-        config.write(configFile)
-
-    defaults=config.defaults()
-
-    initLogging(defaults[keys.logFile])    
-
-    for i in re.split(r'\s*,\s*',defaults[keys.trapPorts]):
-        try:
-            p=int(i)
-            if p>0 and p not in trapPorts:
-                trapPorts.append(p)
-        except Exception:
-            continue
-
-    # 规则有效时间  
-    trappedDuration=int(defaults[keys.trappedDuration])
-
-    # 命令行传入的优先级更高
-    if dbFileName_cmd == None:
-        dbFileName=defaults[keys.dbFile]
-    else:
-        dbFileName=dbFileName_cmd
-    logging.debug(f'config file: {configFileName}, db file: {dbFileName}')
-    logging.info(f'Trap ports: {trapPorts}')
-
-    if not os.path.exists(os.path.dirname(dbFileName)):
-        os.mkdir(os.path.dirname(dbFileName))   
-    db=configparser.ConfigParser()
-    db.read(dbFileName)
-except Exception as e:
-    logging.error(f'Init Error, {e}')
-
-ruleComment='pstrap rule'
-
-lock=threading.RLock()
-
-datetimeFormat='%Y-%m-%dT%H:%M:%S'
-
-
-def saveDB():
-    ''' 将规则保存的配置文件'''
     with lock, open(dbFileName,'w') as dbFile:
             db.write(dbFile)
-    
-saveDB()
-
 
 def cleanOldRules(onlyConfig=False):
     '''清除过期规则，onlyConfig=True时只清除配置文件不处理防火墙'''
-
-    if trappedDuration<=0:
-        logging.debug(f'Skip old rules cleaning because {keys.trappedDuration}={trappedDuration} is not positive.')
+    if trapped_duration<=0:
+        logging.debug(f'Skip old rules cleaning because {config_keys.trappedDuration}={trapped_duration} is not positive.')
         return
 
     db_changed=False
@@ -144,67 +172,34 @@ def cleanOldRules(onlyConfig=False):
             now=datetime.now()
             for i in db.sections():
                 sec=db[i]
-                trappedTime=datetime.strptime(sec[keys.trappedTime], datetimeFormat)
+                trappedTime=datetime.strptime(sec[config_keys.trappedTime], datetime_format)
                 dur=now-trappedTime
-                if dur.total_seconds()<0 or dur.total_seconds()/60>trappedDuration:
+                if dur.total_seconds()<0 or dur.total_seconds()/60>trapped_duration:
                     logging.info(f'Rule for {i} expired, which was created at {trappedTime}.' )
                     db.remove_section(i)
                     db_changed=True
                     if not onlyConfig:
-                        deleteIPRule(i)
+                        deleteIPDenyRule(i)
         except Exception as e:
             logging.error(f"Clean old rules error: {e}")
         if db_changed:
             saveDB()
 
-def addAllRule(): 
-    '''把所有规则加入防火墙'''   
-    for i in trapPorts:# 允许陷阱端口
+
+def addTrapPortAllowRules():    
+    for i in trap_ports:
         allowPort(i)
+
+def addAllDenyRules():
     for i in db.sections():
-        denyIP(i,db[i][keys.trappedTime])
+        denyIP(i)
 
-def allowPort(port:int):
-    with lock:
-        os.system(f'ufw insert 1 allow "{port}/tcp" comment "{ruleComment}"')
-    
-def denyIP(ip:str, time:str):   
-    with lock: 
-        r=os.popen(f'ufw insert 1 deny from "{ip}" comment "{ruleComment} {time}"').read()
-        logging.debug('Added deny rule for %s. ufw result:\n%s', ip, r)
-    
-
-def deleteIPRule(ip:str, locked:bool=False):    
-    with lock:
-        n=0
-        while True:
-            r=os.popen('ufw status numbered').read()
-            m=re.search(r'^\[\s*(\d+)\s*\].*?{}.*?#\s*{}.*$'.format(ip,ruleComment),r,flags=re.MULTILINE)
-            print(m)
-            if m:
-                os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
-                n+=1
-            else:
-                break    
-        logging.debug("%d rule for %s deleted.",n,ip)
-    
-
-def clearAllRule():
-    '''删除所有备注匹配的规则'''
-    with lock:
-        n=0
-        while True:
-            r=os.popen('ufw status numbered').read()
-            m=re.search(r'^\[\s*(\d+)\s*\].*?#.*{}.*$'.format(ruleComment),r,flags=re.MULTILINE)
-            if m:
-                os.system(f'echo y | ufw delete "{m.groups(0)[0]}"')
-                n+=1
-            else:
-                break    
-        logging.debug("Rule cleared. %d deleted.",n)
+def clearAllRule():   
+    cleanChain(iptables_names.trap_port_chain)
+    cleanChain(iptables_names.deny_chian)
     
 def listen(port:int):
-    '''各端口监听线程'''
+    '''listening for trap port'''
     with socket.socket() as s:
         try:
             s.bind(('0.0.0.0',port))
@@ -217,37 +212,118 @@ def listen(port:int):
             rip,rport=addr
             lip,lport=cs.getsockname()
             cs.close()
-            time=datetime.now().strftime(datetimeFormat)
+            time=datetime.now().strftime(datetime_format)
             logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
 
             with lock:
                 if not db.has_section(rip):
                     db.add_section(rip)    
                 sec=db[rip]    
-                sec[keys.trappedTime]=time
-                sec[keys.trappedPort]=str(lport)
+                sec[config_keys.trappedTime]=time
+                sec[config_keys.trappedPort]=str(lport)
                   
             saveDB()
-            denyIP(rip,time) 
+            denyIP(rip) 
 
-cleanerSleepTime=60
-def cleaner():
-    '''过期规则清理线程'''
+
+def clean():
+    '''cleaning for old rule'''
     while True:
-        time.sleep(cleanerSleepTime)
+        time.sleep(cleaner_sleep_time)
         cleanOldRules()
         logging.debug(f"Old rule cleaning finished, with {len(db.sections())} remained.")
 
-cleanOldRules(True)
-clearAllRule()
-addAllRule()
+# 从命令行传入的配置文件路径
+def parseArgs():
+    for i in range(1,len(sys.argv)):
+        cv=sys.argv[i]
+        if cv=='-c':
+            if len(sys.argv)>i+1:
+                i+=1
+                configFileName=sys.argv[i]
+                continue
+            else:
+                print('-c arg not given.')
+                sys.exit(-1)
+        if cv=='-d':
+            if len(sys.argv)>i+1:
+                i+=1
+                dbFileName_cmd=sys.argv[i]
+                continue
+            else:
+                print('-d arg not given.')
+                sys.exit(-1)
 
-threads={}
-for i in trapPorts:
-    t=threading.Thread(target=listen,args=(i,))    
-    t.start()
-    threads[i]=t
+def init():
+    global dbFileName, trapped_duration
+    try:
+        print(f'Reading config file: {configFileName}')        
+        config=configparser.ConfigParser(
+            defaults={
+                config_keys.trapPorts:'',
+                config_keys.dbFile:dbFileName,
+                config_keys.logFile:'/var/log/pstrap.log',
+                config_keys.trappedDuration:str(60*24*7)
+                })
 
-cleaningThread=threading.Thread(target=cleaner)
-cleaningThread.start()
-cleaningThread.join()
+        if not os.path.exists(os.path.dirname(configFileName)):
+            os.makedirs(os.path.dirname(configFileName))
+        config.read(configFileName)
+        with open(configFileName,'w') as configFile:
+            config.write(configFile)
+
+        defaults=config.defaults()
+
+        initLogging(defaults[config_keys.logFile])   
+        logging.info('Program started.')
+
+        for i in re.split(r'\s*,\s*',defaults[config_keys.trapPorts]):
+            try:
+                p=int(i)
+                if p>0 and p not in trap_ports:
+                    trap_ports.append(p)
+            except Exception:
+                continue
+
+        # 规则有效时间  
+        trapped_duration=int(defaults[config_keys.trappedDuration])
+
+        # 命令行传入的优先级更高
+        if dbFileName_cmd == None:
+            dbFileName=defaults[config_keys.dbFile]
+        else:
+            dbFileName=dbFileName_cmd
+        logging.info(f'Config File: {configFileName}, DB File: {dbFileName}')
+        logging.info(f'configs: {defaults}')
+       
+        if not os.path.exists(os.path.dirname(dbFileName)):
+            os.makedirs(os.path.dirname(dbFileName))   
+            
+        
+        db.read(dbFileName)
+    except Exception as e:
+        logging.error(f'Init Error, {e}')
+
+    saveDB()
+
+def main():
+    parseArgs()
+    init()    
+    cleanOldRules(True)
+    initIptables()
+    addAllDenyRules()
+    addTrapPortAllowRules()
+
+    threads={}
+    for i in trap_ports:
+        t=threading.Thread(target=listen,args=(i,))    
+        t.start()
+        threads[i]=t
+
+    cleaningThread=threading.Thread(target=clean)
+    cleaningThread.start()
+    cleaningThread.join()
+
+
+if __name__=='__main__':
+    main()
