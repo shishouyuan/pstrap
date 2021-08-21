@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from typing import List
 
 app_name='pstrap'
 
@@ -41,6 +42,41 @@ cleaner_sleep_time=60
 iptables_main_table='filter'
 iptables_main_chain='INPUT'
 
+def argSplit(s:str,sep:str=' ',gp:str='"')->List[str]:
+    '''Split string at `sep`s that are not enclosed by `gp`.
+    Successive `sep`s will be treated as one.
+    Leading and tailing `sep`s will be ignored.'''
+    r=[]
+    v=''
+    gpStarted=False
+    unitStarted=False
+    def next():
+        nonlocal v,unitStarted
+        unitStarted=False
+        r.append(v)
+        v=''
+    for i in s:
+        if i==gp:
+            if gpStarted:
+                next()
+                gpStarted=False
+            else:
+                gpStarted=True
+                unitStarted=True
+        elif gpStarted:
+            v+=i
+        elif unitStarted:
+            if i==sep:
+                next()
+            else:
+                v+=i
+        else:
+            if i!=sep:
+                v+=i
+                unitStarted=True
+    if len(v)>0:
+        r.append(v)
+    return r
 
 def getRulesFromIptables(table,chain)->list:
     with lock:
@@ -50,7 +86,7 @@ def getRulesFromIptables(table,chain)->list:
             return []
         v=[]
         for i in range(2,len(r)):
-            t=r[i].split()
+            t=argSplit(r[i])
             if len(t)>=6:
                 v.append({
                     'num':t[0],
@@ -90,7 +126,7 @@ def deleteRule(table:str,chain:str,field:str,val:str)->int:
         finished=False
         while not finished:
             finished=True
-            r=getRulesFromIptables(table,chain)        
+            r=getRulesFromIptables(table,chain)
             for i in r:
                 try:
                     if i[field]==val:
