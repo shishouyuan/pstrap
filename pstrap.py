@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime
 from typing import List
+import struct
 
 app_name='pstrap'
 
@@ -99,6 +100,21 @@ def getRulesFromIptables(table,chain)->list:
                 })
         return v
 
+def createChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        return os.system(f'iptables -t "{table}" -N "{name}"')==0
+
+def removeChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        if cleanChain(name,table):
+            return  os.system(f'iptables -t "{table}" -X "{name}"')==0
+        else:
+            return False
+
+def cleanChain(name:str, table:str=iptables_main_table)->bool:
+    with lock:
+        return os.system(f'iptables -t "{table}" -F "{name}"')==0
+   
 def deleteRuleByNumber(num:int,table:str,chain:str):
     with lock:
         return os.system(f'iptables -t "{table}" -D "{chain}" {num}')
@@ -159,21 +175,6 @@ def denyIP(ip:str,table:str=iptables_main_table,chain:str=iptables_names.deny_ch
 def deleteIPDenyRule(ip:str, table:str=iptables_main_table,chain:str=iptables_names.deny_chian):    
     n=deleteRule(table,chain,'source',ip)  
     logging.debug(f'Deleted {n} deny rule for {ip}.')
-        
-def createChain(name:str, table:str=iptables_main_table)->bool:
-    with lock:
-        return os.system(f'iptables -t "{table}" -N "{name}"')==0
-
-def removeChain(name:str, table:str=iptables_main_table)->bool:
-    with lock:
-        if cleanChain(name,table):
-            return  os.system(f'iptables -t "{table}" -X "{name}"')==0
-        else:
-            return False
-
-def cleanChain(name:str, table:str=iptables_main_table)->bool:
-    with lock:
-        return os.system(f'iptables -t "{table}" -F "{name}"')==0
     
 def initLogging(LogFileName:str)->logging.Logger:    
     formatter = logging.Formatter("%(asctime)s - %(filename)s[%(lineno)d] - %(levelname)s: %(message)s")
@@ -222,7 +223,6 @@ def cleanOldRules(onlyConfig=False):
         if db_changed:
             saveDB()
 
-
 def addTrapPortAllowRules():    
     for i in trap_ports:
         allowPort(i)
@@ -234,34 +234,42 @@ def addAllDenyRules():
 def clearAllRule():   
     cleanChain(iptables_names.trap_port_chain)
     cleanChain(iptables_names.deny_chian)
-    
-def listen(port:int):
+
+def trapIP(rip:str,rport:int,lip:str,lport:int):
+    time=datetime.now().strftime(datetime_format)
+    logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
+    with lock:
+        if not db.has_section(rip):
+            db.add_section(rip)    
+        sec=db[rip]    
+        sec[config_keys.trappedTime]=time
+        sec[config_keys.trappedPort]=str(lport)                    
+    saveDB()
+    denyIP(rip)
+
+def listen(ports:List[int]):
     '''listening for trap port'''
-    with socket.socket() as s:
-        try:
-            s.bind(('0.0.0.0',port))
-            s.listen()
-        except Exception as e:
-            logging.error(f"Port {port} binding error: {e}")
-            return
+    with socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_TCP) as sock:
         while True:
-            cs,addr=s.accept()
-            rip,rport=addr
-            lip,lport=cs.getsockname()
-            cs.close()
-            time=datetime.now().strftime(datetime_format)
-            logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
-
-            with lock:
-                if not db.has_section(rip):
-                    db.add_section(rip)    
-                sec=db[rip]    
-                sec[config_keys.trappedTime]=time
-                sec[config_keys.trappedPort]=str(lport)
-                  
-            saveDB()
-            denyIP(rip) 
-
+            try:
+                buf=sock.recv(1000)
+                if len(buf)>=20:
+                    param={
+                        'ver':buf[0]>>4,
+                        'head_length':buf[0]&0xf,
+                        'total_length':struct.unpack('>H',buf[2:4]),
+                        'protocol':buf[9],
+                        'src_addr':f'{buf[12]}.{buf[13]}.{buf[14]}.{buf[15]}',
+                        'dst_addr':f'{buf[16]}.{buf[17]}.{buf[18]}.{buf[19]}'
+                    }
+                    tcp_offset=param['head_length']*4
+                    if len(buf)>=tcp_offset+4:
+                        param['src_port']=struct.unpack('>H',buf[tcp_offset:tcp_offset+2])[0]
+                        param['dst_port']=struct.unpack('>H',buf[tcp_offset+2:tcp_offset+4])[0]                        
+                        if param['dst_port'] in ports:                            
+                            trapIP(param['src_addr'],param['src_port'],param['dst_addr'],param['dst_port']) 
+            except Exception as e:
+                logging.debug(f'Error occurred when listenning, {e}')
 
 def clean():
     '''cleaning for old rule'''
@@ -334,9 +342,8 @@ def init():
         logging.info(f'configs: {defaults}')
        
         if not os.path.exists(os.path.dirname(dbFileName)):
-            os.makedirs(os.path.dirname(dbFileName))   
-            
-        
+            os.makedirs(os.path.dirname(dbFileName))  
+                    
         db.read(dbFileName)
     except Exception as e:
         logging.error(f'Init Error, {e}')
@@ -351,15 +358,10 @@ def main():
     addAllDenyRules()
     addTrapPortAllowRules()
 
-    threads={}
-    for i in trap_ports:
-        t=threading.Thread(target=listen,args=(i,))    
-        t.start()
-        threads[i]=t
-
     cleaningThread=threading.Thread(target=clean)
     cleaningThread.start()
-    cleaningThread.join()
+    
+    listen(trap_ports)
 
 
 if __name__=='__main__':
