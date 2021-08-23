@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 import struct
 from typing import Iterable
+import queue
 
 app_name='pstrap'
 
@@ -248,6 +249,13 @@ def trapIP(rip:str,rport:int,lip:str,lport:int):
     saveDB()
     denyIP(rip)
 
+
+trapped_queue:'queue.Queue[tuple[str,int,str,int]]'=queue.Queue()
+
+def collect():
+    while True:
+        trapIP(*trapped_queue.get())
+
 def listen(ports:Iterable[int]):
     '''listening for trap port'''
     with socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_TCP) as sock:
@@ -268,7 +276,7 @@ def listen(ports:Iterable[int]):
                         param['src_port']=struct.unpack('>H',buf[tcp_offset:tcp_offset+2])[0]
                         param['dst_port']=struct.unpack('>H',buf[tcp_offset+2:tcp_offset+4])[0]                        
                         if param['dst_port'] in ports:                            
-                            trapIP(param['src_addr'],param['src_port'],param['dst_addr'],param['dst_port']) 
+                            trapped_queue.put((param['src_addr'],param['src_port'],param['dst_addr'],param['dst_port'])) 
             except Exception as e:
                 logging.debug(f'Error occurred when listenning, {e}')
 
@@ -374,6 +382,9 @@ def main():
 
     cleaningThread=threading.Thread(target=clean)
     cleaningThread.start()
+
+    collectingThread=threading.Thread(target=collect)
+    collectingThread.start()
     
     listen(valid_trap_ports.keys())
     
