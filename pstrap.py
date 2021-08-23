@@ -9,8 +9,8 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import List
 import struct
+from typing import Iterable
 
 app_name='pstrap'
 
@@ -35,6 +35,7 @@ class iptables_names:
 
 # globals variables
 trap_ports=[]
+valid_trap_ports:'dict[int,socket.socket]'={}
 db=configparser.ConfigParser()
 lock=threading.RLock()
 datetime_format='%Y-%m-%dT%H:%M:%S'
@@ -43,7 +44,7 @@ cleaner_sleep_time=60
 iptables_main_table='filter'
 iptables_main_chain='INPUT'
 
-def argSplit(s:str,sep:str=' ',gp:str='"')->List[str]:
+def argSplit(s:str,sep:str=' ',gp:str='"')->'list[str]':
     '''Split string at `sep`s that are not enclosed by `gp`.
     Successive `sep`s will be treated as one.
     Leading and tailing `sep`s will be ignored.'''
@@ -247,7 +248,7 @@ def trapIP(rip:str,rport:int,lip:str,lport:int):
     saveDB()
     denyIP(rip)
 
-def listen(ports:List[int]):
+def listen(ports:Iterable[int]):
     '''listening for trap port'''
     with socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_TCP) as sock:
         while True:
@@ -278,6 +279,18 @@ def clean():
         cleanOldRules()
         logging.debug(f"Old rule cleaning finished, with {len(db.sections())} remained.")
 
+def validateTrapPorts():
+    for i in trap_ports:
+        sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        try:
+            sock.bind(('0.0.0.0',i))
+            valid_trap_ports[i]=sock
+        except Exception:
+            sock.close()
+            logging.warn(f'Trap port {i} was occupied.')
+    logging.info(f'Validated trap ports: {list(valid_trap_ports.keys())}')
+
+        
 # 从命令行传入的配置文件路径
 def parseArgs():
     for i in range(1,len(sys.argv)):
@@ -352,7 +365,8 @@ def init():
 
 def main():
     parseArgs()
-    init()    
+    init()
+    validateTrapPorts()
     cleanOldRules(True)
     initIptables()
     addAllDenyRules()
@@ -361,8 +375,8 @@ def main():
     cleaningThread=threading.Thread(target=clean)
     cleaningThread.start()
     
-    listen(trap_ports)
-
+    listen(valid_trap_ports.keys())
+    
 
 if __name__=='__main__':
     main()
