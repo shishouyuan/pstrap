@@ -45,42 +45,6 @@ cleaner_sleep_time=60
 iptables_main_table='filter'
 iptables_main_chain='INPUT'
 
-def argSplit(s:str,sep:str=' ',gp:str='"')->'list[str]':
-    '''Split string at `sep`s that are not enclosed by `gp`.
-    Successive `sep`s will be treated as one.
-    Leading and tailing `sep`s will be ignored.'''
-    r=[]
-    v=''
-    gpStarted=False
-    unitStarted=False
-    def next():
-        nonlocal v,unitStarted
-        unitStarted=False
-        r.append(v)
-        v=''
-    for i in s:
-        if i==gp:
-            if gpStarted:
-                next()
-                gpStarted=False
-            else:
-                gpStarted=True
-                unitStarted=True
-        elif gpStarted:
-            v+=i
-        elif unitStarted:
-            if i==sep:
-                next()
-            else:
-                v+=i
-        else:
-            if i!=sep:
-                v+=i
-                unitStarted=True
-    if len(v)>0:
-        r.append(v)
-    return r
-
 def getRulesFromIptables(table,chain)->list:
     with lock:
         with os.popen(f'iptables -t "{table}" -L "{chain}" -n --line-numbers') as o:
@@ -117,28 +81,42 @@ def cleanChain(name:str, table:str=iptables_main_table)->bool:
     with lock:
         return os.system(f'iptables -t "{table}" -F "{name}"')==0
    
-def deleteRuleByNumber(num:int,table:str,chain:str):
+def deleteRuleByNumber(num:int,table:str=iptables_main_table,chain:str=iptables_main_chain):
     with lock:
         return os.system(f'iptables -t "{table}" -D "{chain}" {num}')
- 
-def disableChains():
-    deleteRule(iptables_main_table,iptables_main_chain,'target',iptables_names.trap_port_chain)  
-    deleteRule(iptables_main_table,iptables_main_chain,'target',iptables_names.deny_chian)  
-  
-def enableChains():
-    with lock:        
-        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.trap_port_chain}"')
-        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.deny_chian}"')
 
-def initIptables():
-    disableChains()
-    removeChain(iptables_names.trap_port_chain)
-    removeChain(iptables_names.deny_chian)
-    createChain(iptables_names.trap_port_chain)
-    createChain(iptables_names.deny_chian)
-    enableChains()   
+def deleteRuleByRegex(reg:re.Pattern,table:str,chain:str):    
+    n=0
+    validReg=re.compile('^-A\\s+(.*)$',re.MULTILINE)
+    with lock:        
+        with os.popen(f'iptables -t "{table}" -S "{chain}"') as o:
+            r=o.read().splitlines()        
+        for i in r:
+            if reg.fullmatch(i):
+                m=validReg.fullmatch(i)
+                if m:
+                    if os.system(f'iptables -t "{table}" -D {m.group(1)}')==0:
+                        n+=1
+    return n
+
+def deleteRuleBySource(src:str,table:str=iptables_main_table,chain:str=iptables_main_chain):
+    try:
+        reg=re.compile(f'^-A\\s+{chain}(?=\\s).*?(?<=\\s)-s\\s+{src}/32\\s+.*$')
+        return deleteRuleByRegex(reg,table,chain)
+    except Exception:
+        return 0
+
+def deleteRuleByTarget(target:str,table:str=iptables_main_table,chain:str=iptables_main_chain):
+    try:
+        reg=re.compile(f'^-A\\s+({chain}(?=\\s).*?(?<=\\s)-j\\s+{target})$')
+        return deleteRuleByRegex(reg,table,chain)
+    except Exception:
+        return 0
     
-def deleteRule(table:str,chain:str,field:str,val:str)->int:
+def deleteRule(field:str,val:str,table:str=iptables_main_table,chain:str=iptables_names.deny_chian)->int:
+    '''Delete rule whose `filed`==`val`.
+    It calls deleteRuleByNumber, which may not be safe to work with public chains.
+    '''
     with lock: # rule number may change by other operation
         n=0
         finished=False
@@ -175,30 +153,38 @@ def denyIP(ip:str,table:str=iptables_main_table,chain:str=iptables_names.deny_ch
             logging.warning(f'Failed to add deny rule for {ip} into {table}.{chain} with code {r}.')
 
 def deleteIPDenyRule(ip:str, table:str=iptables_main_table,chain:str=iptables_names.deny_chian):    
-    n=deleteRule(table,chain,'source',ip)  
+    # n=deleteRule('source',ip,table,chain) 
+    n=deleteRuleBySource(ip,table,chain) 
     logging.debug(f'Deleted {n} deny rule for {ip}.')
-    
-def initLogging(LogFileName:str)->logging.Logger:    
-    formatter = logging.Formatter("%(asctime)s - %(filename)s[%(lineno)d] - %(levelname)s: %(message)s")
-    
-    fh = logging.handlers.RotatingFileHandler(LogFileName, mode='a', maxBytes=1024*1024*10, backupCount=2,encoding='utf8')
-    fh.setLevel(logging.INFO)  
-    fh.setFormatter(formatter)
 
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    ch.setFormatter(formatter)
-    
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG) 
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    return logger
+def addTrapPortAllowRules():    
+    for i in trap_ports:
+        allowPort(i)
 
-def saveDB():    
-    
-    with lock, open(dbFileName,'w') as dbFile:
-            db.write(dbFile)
+def addAllDenyRules():
+    for i in db.sections():
+        denyIP(i)
+
+def clearAllRule():   
+    cleanChain(iptables_names.trap_port_chain)
+    cleanChain(iptables_names.deny_chian)
+
+def disableChains():
+    deleteRuleByTarget(iptables_names.trap_port_chain)  
+    deleteRuleByTarget(iptables_names.deny_chian)  
+  
+def enableChains():
+    with lock:        
+        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.trap_port_chain}"')
+        os.system(f'iptables -t "{iptables_main_table}" -I "{iptables_main_chain}" -j "{iptables_names.deny_chian}"')
+
+def initIptables():
+    disableChains()
+    removeChain(iptables_names.trap_port_chain)
+    removeChain(iptables_names.deny_chian)
+    createChain(iptables_names.trap_port_chain)
+    createChain(iptables_names.deny_chian)
+    enableChains()   
 
 def cleanOldRules(onlyConfig=False):
     '''清除过期规则，onlyConfig=True时只清除配置文件不处理防火墙'''
@@ -225,18 +211,6 @@ def cleanOldRules(onlyConfig=False):
         if db_changed:
             saveDB()
 
-def addTrapPortAllowRules():    
-    for i in trap_ports:
-        allowPort(i)
-
-def addAllDenyRules():
-    for i in db.sections():
-        denyIP(i)
-
-def clearAllRule():   
-    cleanChain(iptables_names.trap_port_chain)
-    cleanChain(iptables_names.deny_chian)
-
 def trapIP(rip:str,rport:int,lip:str,lport:int):
     time=datetime.now().strftime(datetime_format)
     logging.info('Got trapped connection from %s:%d to %s:%d',rip,rport,lip,lport)
@@ -248,7 +222,6 @@ def trapIP(rip:str,rport:int,lip:str,lport:int):
         sec[config_keys.trappedPort]=str(lport)                    
     saveDB()
     denyIP(rip)
-
 
 trapped_queue:'queue.Queue[tuple[str,int,str,int]]'=queue.Queue()
 
@@ -319,6 +292,64 @@ def parseArgs():
             else:
                 print('-d arg not given.')
                 sys.exit(-1)
+
+
+def argSplit(s:str,sep:str=' ',gp:str='"')->'list[str]':
+    '''Split string at `sep`s that are not enclosed by `gp`.
+    Successive `sep`s will be treated as one.
+    Leading and tailing `sep`s will be ignored.'''
+    r=[]
+    v=''
+    gpStarted=False
+    unitStarted=False
+    def next():
+        nonlocal v,unitStarted
+        unitStarted=False
+        r.append(v)
+        v=''
+    for i in s:
+        if i==gp:
+            if gpStarted:
+                next()
+                gpStarted=False
+            else:
+                gpStarted=True
+                unitStarted=True
+        elif gpStarted:
+            v+=i
+        elif unitStarted:
+            if i==sep:
+                next()
+            else:
+                v+=i
+        else:
+            if i!=sep:
+                v+=i
+                unitStarted=True
+    if len(v)>0:
+        r.append(v)
+    return r
+    
+def initLogging(LogFileName:str)->logging.Logger:    
+    formatter = logging.Formatter("%(asctime)s - %(filename)s[%(lineno)d] - %(levelname)s: %(message)s")
+    
+    fh = logging.handlers.RotatingFileHandler(LogFileName, mode='a', maxBytes=1024*1024*10, backupCount=2,encoding='utf8')
+    fh.setLevel(logging.INFO)  
+    fh.setFormatter(formatter)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    ch.setFormatter(formatter)
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG) 
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+def saveDB():    
+    with lock, open(dbFileName,'w') as dbFile:
+        db.write(dbFile)
 
 def init():
     global dbFileName, trapped_duration
